@@ -1,20 +1,382 @@
+
 <!DOCTYPE html>
 <html lang="no">
 <head>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Dart AutoScore</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Dart AutoScore – Stabil AI</title>
+  <style>
+    body{margin:0;background:#000;color:#fff;font-family:-apple-system,system-ui,sans-serif}
+    .bar{padding:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    button{border:0;border-radius:12px;padding:10px 12px;font-weight:700;background:#1f6feb;color:#fff}
+    button.secondary{background:#2b2b2b}
+    button.danger{background:#b42318}
+    .pill{padding:6px 10px;border-radius:999px;background:#151515;font-size:12px;opacity:.95}
+    #wrap{position:relative;width:100vw;height:calc(100vh - 64px);overflow:hidden}
+    video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+    #hud{position:absolute;left:10px;bottom:10px;max-width:92vw}
+    .hint{background:rgba(0,0,0,.45);padding:10px 12px;border-radius:12px;font-size:13px;line-height:1.25}
+    input[type="range"]{width:180px}
+  </style>
 </head>
-<body style="margin:0;background:black;color:white;font-family:sans-serif;">
-  <h2 style="text-align:center;">🎯 Dart AutoScore</h2>
+<body>
+  <div class="bar">
+    <span class="pill" id="status">Starter…</span>
+    <button id="cal" class="secondary">Kalibrer (3 trykk)</button>
+    <button id="baseline" class="secondary">Baseline (tom skive)</button>
+    <button id="detect">Detect</button>
+    <button id="reset" class="danger">Reset</button>
+    <span class="pill" id="out">Score: –</span>
+    <span class="pill">Thr <span id="thrV">35</span></span>
+    <input id="thr" type="range" min="15" max="80" value="35"/>
+  </div>
 
-  <video id="video" autoplay playsinline style="width:100%;"></video>
+  <div id="wrap">
+    <video id="v" autoplay playsinline muted></video>
+    <canvas id="c"></canvas>
+    <div id="hud"><div class="hint" id="hint">
+      1) <b>Kalibrer</b>: trykk <b>bull</b> → <b>dobbel 20</b> (topp) → <b>dobbel 6</b> (høyre).<br>
+      2) <b>Baseline</b> med tom skive.<br>
+      3) Kast 1 pil → <b>Detect</b>.
+    </div></div>
+  </div>
 
+  <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
   <script>
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
-      .then(stream => {
-        document.getElementById("video").srcObject = stream;
-      })
-      .catch(err => alert("Kamera-feil: " + err));
+  (() => {
+    const v = document.getElementById('v');
+    const c = document.getElementById('c');
+    const ctx = c.getContext('2d', { willReadFrequently:true });
+    const statusEl = document.getElementById('status');
+    const outEl = document.getElementById('out');
+    const hintEl = document.getElementById('hint');
+    const thr = document.getElementById('thr');
+    const thrV = document.getElementById('thrV');
+
+    thr.addEventListener('input', ()=> thrV.textContent = thr.value);
+
+    function setStatus(t){ statusEl.textContent = t; }
+    function setOut(t){ outEl.textContent = 'Score: ' + t; }
+
+    function resize(){
+      const r = c.getBoundingClientRect();
+      c.width = Math.floor(r.width * devicePixelRatio);
+      c.height = Math.floor(r.height * devicePixelRatio);
+      ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+    }
+    window.addEventListener('resize', resize);
+
+    // Calibration state
+    const SECTORS = [20,1,18,4,13,6,10,15,2,17,3,19,7,16,8,11,14,9,12,5];
+    const RING = { innerBull: 6.35/170, outerBull: 15.9/170, tripleIn: 99/170, tripleOut: 107/170, doubleIn: 162/170, doubleOut: 170/170 };
+
+    let calib = { ready:false, center:null, top:null, right:null, R:null, angle0:null };
+    let mode = { cal:false, step:0 };
+    let baselineMat = null;     // cv.Mat ROI baseline (grayscale)
+    let roi = null;             // ROI rectangle in full-res frame coordinates (x,y,w,h) around board
+    let lastPoint = null;       // last detected point for drawing marker
+
+    function draw(){
+      const rect = c.getBoundingClientRect();
+      ctx.clearRect(0,0,rect.width,rect.height);
+
+      // helper: video->screen mapping with object-fit cover
+      const vw = v.videoWidth, vh = v.videoHeight;
+      if(!vw || !vh) return;
+      const sx = rect.width / vw, sy = rect.height / vh;
+      const s = Math.max(sx, sy);
+      const drawW = vw*s, drawH = vh*s;
+      const offX = (rect.width - drawW)/2, offY = (rect.height - drawH)/2;
+
+      const v2s = (p)=>({ x: offX + p.x*s, y: offY + p.y*s });
+      const dot = (p, label)=>{
+        const sp = v2s(p);
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, 8, 0, Math.PI*2);
+        ctx.fillStyle='rgba(31,111,235,0.9)'; ctx.fill();
+        ctx.fillStyle='#fff'; ctx.font='14px system-ui'; ctx.fillText(label, sp.x+10, sp.y-10);
+      };
+
+      if(calib.center) dot(calib.center,'C');
+      if(calib.top) dot(calib.top,'20');
+      if(calib.right) dot(calib.right,'6');
+
+      if(calib.ready){
+        const C = v2s(calib.center);
+        const R = calib.R * s;
+        const ring=(f)=>{
+          ctx.beginPath(); ctx.arc(C.x,C.y,R*f,0,Math.PI*2);
+          ctx.strokeStyle='rgba(255,255,255,0.30)'; ctx.lineWidth=2; ctx.stroke();
+        };
+        ring(RING.outerBull); ring(RING.tripleIn); ring(RING.tripleOut); ring(RING.doubleIn); ring(RING.doubleOut);
+      }
+
+      if(lastPoint){
+        const sp = v2s(lastPoint);
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, 10, 0, Math.PI*2);
+        ctx.strokeStyle='rgba(0,255,120,0.95)'; ctx.lineWidth=3; ctx.stroke();
+      }
+    }
+
+    function getVideoPointFromTap(clientX, clientY){
+      const rect = c.getBoundingClientRect();
+      const x = clientX - rect.left, y = clientY - rect.top;
+      const vw = v.videoWidth, vh = v.videoHeight;
+      const sx = rect.width / vw, sy = rect.height / vh;
+      const s = Math.max(sx, sy);
+      const drawW = vw*s, drawH = vh*s;
+      const offX = (rect.width - drawW)/2, offY = (rect.height - drawH)/2;
+      return { x:(x-offX)/s, y:(y-offY)/s };
+    }
+
+    function finalizeCal(){
+      const C=calib.center, T=calib.top;
+      const dx=T.x-C.x, dy=T.y-C.y;
+      calib.R = Math.hypot(dx,dy);
+      calib.angle0 = Math.atan2(dy,dx);
+      calib.ready = true;
+
+      // Define ROI around board (slightly larger than outer double)
+      const pad = calib.R * 1.10;
+      roi = {
+        x: Math.max(0, Math.floor(C.x - pad)),
+        y: Math.max(0, Math.floor(C.y - pad)),
+        w: Math.floor(Math.min(v.videoWidth  - Math.max(0, Math.floor(C.x - pad)), pad*2)),
+        h: Math.floor(Math.min(v.videoHeight - Math.max(0, Math.floor(C.y - pad)), pad*2))
+      };
+
+      setStatus('Kalibrert ✅');
+      hintEl.innerHTML = 'Kalibrert ✅<br>Trykk <b>Baseline</b> (tom skive), kast 1 pil og trykk <b>Detect</b>.';
+      draw();
+    }
+
+    function scoreFromPoint(P){
+      const C=calib.center;
+      const dx=P.x-C.x, dy=P.y-C.y;
+      const dist=Math.hypot(dx,dy);
+      const frac=dist/calib.R;
+
+      if(frac > RING.doubleOut*1.03) return {score:0, detail:'Utenfor'};
+      if(frac <= RING.innerBull) return {score:50, detail:'Bull (50)'};
+      if(frac <= RING.outerBull) return {score:25, detail:'Bull (25)'};
+
+      let ang = Math.atan2(dy,dx);
+      let d = ang - calib.angle0;
+      while(d<0) d += Math.PI*2;
+      while(d>=Math.PI*2) d -= Math.PI*2;
+
+      const sectorWidth=(Math.PI*2)/20;
+      const idx = Math.floor((d + sectorWidth/2)/sectorWidth) % 20;
+      const base = SECTORS[idx];
+
+      let mult=1;
+      if(frac >= RING.doubleIn) mult=2;
+      else if(frac >= RING.tripleIn && frac <= RING.tripleOut) mult=3;
+
+      return {score: base*mult, detail:`${mult===1?'S':'D'===2?'D':'T'} ${base}`};
+    }
+
+    // Click handler for calibration + manual correction
+    c.addEventListener('click', (ev)=>{
+      const p = getVideoPointFromTap(ev.clientX, ev.clientY);
+
+      if(mode.cal){
+        if(mode.step===0){ calib.center=p; mode.step=1; setStatus('Kalibrer: trykk dobbel 20 (topp)'); }
+        else if(mode.step===1){ calib.top=p; mode.step=2; setStatus('Kalibrer: trykk dobbel 6 (høyre)'); }
+        else { calib.right=p; mode.cal=false; mode.step=0; finalizeCal(); }
+        draw();
+        return;
+      }
+
+      // Manual correction: if baseline exists and calibrated, tapping scores point
+      if(calib.ready){
+        lastPoint = p;
+        const s = scoreFromPoint(p);
+        setOut(`${s.score} (${s.detail})`);
+        setStatus('Manuell score ✅');
+        draw();
+      }
+    });
+
+    document.getElementById('cal').addEventListener('click', ()=>{
+      mode.cal=true; mode.step=0;
+      calib={ready:false,center:null,top:null,right:null,R:null,angle0:null};
+      baselineMat=null; roi=null; lastPoint=null;
+      setOut('–');
+      setStatus('Kalibrer: trykk bull');
+      hintEl.innerHTML='Kalibrer: trykk <b>bull</b>.';
+      draw();
+    });
+
+    document.getElementById('reset').addEventListener('click', ()=>{
+      mode.cal=false; mode.step=0;
+      calib={ready:false,center:null,top:null,right:null,R:null,angle0:null};
+      baselineMat=null; roi=null; lastPoint=null;
+      setOut('–');
+      setStatus('Reset');
+      hintEl.innerHTML='Trykk <b>Kalibrer</b> for å starte.';
+      draw();
+    });
+
+    function grabMatROIGray(){
+      // draw current frame to offscreen canvas at native size
+      const vw=v.videoWidth, vh=v.videoHeight;
+      const off=document.createElement('canvas');
+      off.width=vw; off.height=vh;
+      const octx=off.getContext('2d', { willReadFrequently:true });
+      octx.drawImage(v,0,0,vw,vh);
+      const img=octx.getImageData(0,0,vw,vh);
+      let mat = cv.matFromImageData(img);
+      let gray = new cv.Mat();
+      cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
+      mat.delete();
+
+      // Crop ROI (board-only)
+      const r = new cv.Rect(roi.x, roi.y, roi.w, roi.h);
+      let cropped = gray.roi(r);
+      gray.delete();
+      return cropped; // caller must delete
+    }
+
+    // Median of 3 frames for stability
+    function median3(a,b,c){
+      // a,b,c are cv.Mat same size, grayscale
+      let ab = new cv.Mat(), bc = new cv.Mat(), ac = new cv.Mat(), tmp = new cv.Mat();
+      cv.max(a,b,ab); cv.min(a,b,tmp); // tmp = min(a,b)
+      cv.min(ab,c,bc); // bc = min(max(a,b), c)
+      cv.max(tmp,c,ac); // ac = max(min(a,b), c)
+      cv.min(bc,ac,ab); // ab = median
+      tmp.delete(); bc.delete(); ac.delete();
+      return ab; // median mat
+    }
+
+    document.getElementById('baseline').addEventListener('click', async ()=>{
+      if(!calib.ready){ alert('Kalibrer først'); return; }
+      if(!window.cv || !cv.Mat){ alert('OpenCV laster fortsatt… vent litt.'); return; }
+
+      setStatus('Tar baseline…');
+      // take 3 frames and median them
+      const A=grabMatROIGray(); await new Promise(r=>setTimeout(r,80));
+      const B=grabMatROIGray(); await new Promise(r=>setTimeout(r,80));
+      const C=grabMatROIGray();
+      const M=median3(A,B,C);
+      A.delete(); B.delete(); C.delete();
+
+      if(baselineMat) baselineMat.delete();
+      baselineMat = M;
+
+      setStatus('Baseline satt ✅');
+      hintEl.innerHTML='Baseline satt ✅<br>Kast 1 pil og trykk <b>Detect</b>.';
+    });
+
+    document.getElementById('detect').addEventListener('click', async ()=>{
+      if(!calib.ready){ alert('Kalibrer først'); return; }
+      if(!baselineMat){ alert('Trykk Baseline først (tom skive).'); return; }
+      if(!window.cv || !cv.Mat){ alert('OpenCV laster fortsatt… vent litt.'); return; }
+
+      setStatus('Analyserer…');
+
+      // Current frame (median of 3)
+      const A=grabMatROIGray(); await new Promise(r=>setTimeout(r,80));
+      const B=grabMatROIGray(); await new Promise(r=>setTimeout(r,80));
+      const C=grabMatROIGray();
+      const cur = median3(A,B,C);
+      A.delete(); B.delete(); C.delete();
+
+      // diff = abs(cur - baseline)
+      let diff = new cv.Mat();
+      cv.absdiff(cur, baselineMat, diff);
+
+      // blur to reduce noise
+      cv.GaussianBlur(diff, diff, new cv.Size(5,5), 0);
+
+      // threshold
+      let bin = new cv.Mat();
+      cv.threshold(diff, bin, parseInt(thr.value,10), 255, cv.THRESH_BINARY);
+
+      // morph open/close
+      const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5,5));
+      cv.morphologyEx(bin, bin, cv.MORPH_OPEN, k);
+      cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, k);
+      k.delete();
+
+      // find contours
+      let contours = new cv.MatVector();
+      let hierarchy = new cv.Mat();
+      cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+      let best = null;
+      let bestScore = -1;
+
+      const minArea =  parseInt(document.getElementById('minArea').value,10) || 800;
+
+      for(let i=0;i<contours.size();i++){
+        const cnt = contours.get(i);
+        const area = cv.contourArea(cnt);
+        if(area < minArea){ cnt.delete(); continue; }
+
+        const rect = cv.boundingRect(cnt);
+        // Heuristic: dart / tip blob often slender; prefer medium area and taller shapes
+        const aspect = rect.height / Math.max(1, rect.width);
+        const score = area * (0.6 + Math.min(2.0, aspect)); // simple heuristic
+        if(score > bestScore){
+          bestScore = score;
+          best = { rect, area };
+        }
+        cnt.delete();
+      }
+
+      hierarchy.delete(); contours.delete();
+
+      if(!best){
+        setStatus('Fant ingen pil ❌ (juster Thr / Min area / lys)');
+        cur.delete(); diff.delete(); bin.delete();
+        return;
+      }
+
+      // Pick point = center of best rect, convert back to full video coords
+      const px = roi.x + best.rect.x + best.rect.width/2;
+      const py = roi.y + best.rect.y + best.rect.height/2;
+      lastPoint = { x:px, y:py };
+
+      const s = scoreFromPoint(lastPoint);
+      setOut(`${s.score} (${s.detail})`);
+      setStatus('Detect ✅');
+
+      // clean
+      cur.delete(); diff.delete(); bin.delete();
+      draw();
+    });
+
+    // Start camera
+    async function startCam(){
+      try{
+        const stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:"environment" }, audio:false });
+        v.srcObject = stream;
+        v.addEventListener('loadedmetadata', ()=>{
+          resize();
+          setStatus('Kamera OK ✅');
+          // redraw periodically
+          setInterval(draw, 250);
+        });
+      }catch(e){
+        setStatus('Kamera-feil ❌');
+        alert('Kamera-feil: ' + e);
+      }
+    }
+
+    // Wait for OpenCV
+    let tries=0;
+    const waitCv = setInterval(()=>{
+      tries++;
+      if(window.cv && cv.Mat){
+        clearInterval(waitCv);
+        setStatus('OpenCV klart ✅');
+      }
+      if(tries>200){ clearInterval(waitCv); setStatus('OpenCV lastet ikke'); }
+    }, 100);
+
+    startCam();
+  })();
   </script>
 </body>
 </html>

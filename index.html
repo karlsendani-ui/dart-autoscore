@@ -3,25 +3,47 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Dart AutoScore – Hybrid v1.2</title>
+  <title>Dart AutoScore – Hybrid v1.2 + 501</title>
   <style>
     body{margin:0;background:#000;color:#fff;font-family:-apple-system,system-ui,sans-serif}
     .bar{padding:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
     button{border:0;border-radius:12px;padding:10px 12px;font-weight:700;background:#1f6feb;color:#fff}
     button.secondary{background:#2b2b2b}
     button.danger{background:#b42318}
+    button.good{background:#14a44d}
     .pill{padding:6px 10px;border-radius:999px;background:#151515;font-size:12px;opacity:.95}
-    #wrap{position:relative;width:100vw;height:calc(100vh - 88px);overflow:hidden}
+    #wrap{position:relative;width:100vw;height:calc(100vh - 156px);overflow:hidden}
     video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
     #hud{position:absolute;left:10px;bottom:10px;max-width:92vw}
     .hint{background:rgba(0,0,0,.45);padding:10px 12px;border-radius:12px;font-size:13px;line-height:1.25}
-    input[type="range"]{width:170px}
-    input[type="number"]{width:90px;border-radius:10px;border:0;padding:8px 10px}
+    input[type="range"]{width:160px}
+    input[type="number"], input[type="text"]{width:130px;border-radius:10px;border:0;padding:8px 10px}
     .ok{color:#65ff9a}
     .warn{color:#ffd36a}
+    .grid{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .scorebox{padding:10px 12px;border:1px solid #222;border-radius:14px;background:#0e0e0e}
+    .mono{font-family: ui-monospace, SFMono-Regular, Menlo, monospace}
+    .small{font-size:12px;color:#bbb}
+    .big{font-size:18px;font-weight:800}
   </style>
 </head>
 <body>
+  <!-- SCOREBOARD BAR -->
+  <div class="bar" style="border-bottom:1px solid #151515;">
+    <span class="pill" id="gameStatus">501: Ikke startet</span>
+
+    <span class="pill" id="playerPill">Spiller: –</span>
+    <span class="pill" id="remainPill">Igjen: –</span>
+    <span class="pill" id="turnPill">Runde: –</span>
+
+    <button id="btnNewLeg" class="secondary">Ny leg (501)</button>
+    <button id="btnNext" class="secondary">Neste spiller</button>
+    <button id="btnUndo" class="danger">Angre siste</button>
+
+    <span class="pill" id="checkoutPill">Checkout: –</span>
+  </div>
+
+  <!-- CAMERA / AI BAR -->
   <div class="bar">
     <span class="pill" id="status">Starter…</span>
 
@@ -30,7 +52,7 @@
     <button id="detect">Detect</button>
     <button id="reset" class="danger">Reset</button>
 
-    <span class="pill" id="out">Score: –</span>
+    <span class="pill" id="out">Siste: –</span>
     <span class="pill" id="conf">AI: –</span>
 
     <span class="pill">Thr <span id="thrV">35</span></span>
@@ -41,6 +63,11 @@
 
     <span class="pill">ConfMin <span id="confV">0.65</span></span>
     <input id="confMin" type="range" min="50" max="95" value="65"/>
+
+    <span class="pill">Spillere</span>
+    <input id="p1" type="text" value="Daniel" />
+    <input id="p2" type="text" value="Spiller 2" />
+    <button id="btnStart" class="good">Start 501</button>
   </div>
 
   <div id="wrap">
@@ -48,10 +75,11 @@
     <canvas id="c"></canvas>
     <div id="hud">
       <div class="hint" id="hint">
-        1) <b>Kalibrer</b>: trykk <b>bull</b> → <b>dobbel 20</b> (topp) → <b>dobbel 6</b> (høyre).<br>
-        2) <b>Baseline</b> med tom skive.<br>
-        3) Kast 1 pil → <b>Detect</b>.<br>
-        Hvis AI er usikker: <span class="warn"><b>Trykk på pilspissen</b></span> for perfekt score.
+        <b>Hybrid v1.2</b> ✅<br>
+        1) Kalibrer: bull → dobbel 20 (topp) → dobbel 6 (høyre).<br>
+        2) Baseline (tom skive).<br>
+        3) Kast → Detect.<br>
+        Hvis AI er usikker: <span class="warn"><b>trykk pilspissen</b></span> for 100% riktig score + auto-summering i 501.
       </div>
     </div>
   </div>
@@ -59,6 +87,7 @@
   <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
   <script>
   (() => {
+    // ---------- UI refs ----------
     const v = document.getElementById('v');
     const c = document.getElementById('c');
     const ctx = c.getContext('2d', { willReadFrequently:true });
@@ -74,13 +103,27 @@
     const confMinEl = document.getElementById('confMin');
     const confV = document.getElementById('confV');
 
+    const gameStatus = document.getElementById('gameStatus');
+    const playerPill = document.getElementById('playerPill');
+    const remainPill = document.getElementById('remainPill');
+    const turnPill = document.getElementById('turnPill');
+    const checkoutPill = document.getElementById('checkoutPill');
+
+    const p1 = document.getElementById('p1');
+    const p2 = document.getElementById('p2');
+    const btnStart = document.getElementById('btnStart');
+    const btnNext = document.getElementById('btnNext');
+    const btnUndo = document.getElementById('btnUndo');
+    const btnNewLeg = document.getElementById('btnNewLeg');
+
     thr.addEventListener('input', ()=> thrV.textContent = thr.value);
     confMinEl.addEventListener('input', ()=> confV.textContent = (confMinEl.value/100).toFixed(2));
 
     function setStatus(t){ statusEl.textContent = t; }
-    function setOut(t){ outEl.textContent = 'Score: ' + t; }
+    function setOut(t){ outEl.textContent = 'Siste: ' + t; }
     function setConf(t){ confEl.textContent = 'AI: ' + t; }
 
+    // ---------- Resize ----------
     function resize(){
       const r = c.getBoundingClientRect();
       c.width = Math.floor(r.width * devicePixelRatio);
@@ -89,7 +132,7 @@
     }
     window.addEventListener('resize', resize);
 
-    // Geometry
+    // ---------- Geometry / board ----------
     const SECTORS = [20,1,18,4,13,6,10,15,2,17,3,19,7,16,8,11,14,9,12,5];
     const RING = { innerBull: 6.35/170, outerBull: 15.9/170, tripleIn: 99/170, tripleOut: 107/170, doubleIn: 162/170, doubleOut: 170/170 };
 
@@ -99,9 +142,335 @@
     let baselineMat = null; // cv.Mat grayscale ROI
     let roi = null;         // {x,y,w,h} in full-res video coords
 
-    let lastPoint = null;   // {x,y} full video coords (marker)
+    let lastPoint = null;   // {x,y} full video coords
     let forceManual = false;
 
+    // ---------- SCOREBOARD (501) ----------
+    let game = {
+      started: false,
+      players: [],
+      current: 0,
+      // per player:
+      // { name, remaining, history: [{type:'dart'|'turn'|'next', player, score, label, before, after, bust, ts, turnIndex}] }
+      turnDarts: [], // current turn darts: [{score,label}]
+      dartsThisTurn: 0
+    };
+
+    function resetLeg(){
+      if(!game.players.length){
+        game.started = false;
+        gameStatus.textContent = '501: Ikke startet';
+        playerPill.textContent = 'Spiller: –';
+        remainPill.textContent = 'Igjen: –';
+        turnPill.textContent = 'Runde: –';
+        checkoutPill.textContent = 'Checkout: –';
+        return;
+      }
+      game.players.forEach(p => {
+        p.remaining = 501;
+        p.history = [];
+      });
+      game.current = 0;
+      game.turnDarts = [];
+      game.dartsThisTurn = 0;
+      game.started = true;
+      gameStatus.textContent = '501: Pågår ✅';
+      updateGameUI();
+    }
+
+    function startGame(){
+      const names = [p1.value.trim(), p2.value.trim()].filter(Boolean);
+      const uniq = names.length ? names : ['Spiller 1','Spiller 2'];
+      game.players = uniq.map(n => ({ name:n, remaining:501, history:[] }));
+      resetLeg();
+    }
+
+    function currentPlayer(){ return game.players[game.current]; }
+
+    function updateGameUI(){
+      if(!game.started){
+        gameStatus.textContent = '501: Ikke startet';
+        return;
+      }
+      const pl = currentPlayer();
+      playerPill.textContent = `Spiller: ${pl.name}`;
+      remainPill.textContent = `Igjen: ${pl.remaining}`;
+      turnPill.textContent = `Runde: ${game.turnDarts.map(d=>d.score).join('+') || '–'} (${game.turnDarts.reduce((a,b)=>a+b.score,0)})`;
+
+      const co = getCheckoutSuggestion(pl.remaining);
+      checkoutPill.textContent = `Checkout: ${co || '–'}`;
+    }
+
+    function nextPlayer(){
+      if(!game.started) return;
+      // clear turn
+      game.turnDarts = [];
+      game.dartsThisTurn = 0;
+      game.current = (game.current + 1) % game.players.length;
+      game.players[game.current].history.push({ type:'next', ts:Date.now() });
+      updateGameUI();
+    }
+
+    function applyDart(score, label){
+      if(!game.started){
+        // still show last score text even if game not started
+        return;
+      }
+      const pl = currentPlayer();
+      const before = pl.remaining;
+      const turnSumBefore = game.turnDarts.reduce((a,b)=>a+b.score,0);
+
+      // Add to turn list
+      game.turnDarts.push({ score, label });
+      game.dartsThisTurn++;
+
+      const turnSum = turnSumBefore + score;
+      let after = before - turnSum;
+
+      let bust = false;
+      let win = false;
+
+      // Standard 501 rules: must finish on a double (or bull 50).
+      // We validate only when player reaches 0 with this dart.
+      if(after < 0 || after === 1){
+        bust = true;
+      } else if(after === 0){
+        // Must be double/bull on last dart
+        const isDoubleFinish = isFinishDart(label, score);
+        if(!isDoubleFinish){
+          bust = true;
+        } else {
+          win = true;
+        }
+      }
+
+      if(bust){
+        // bust: score for whole turn is void; remaining stays at "before"
+        // record and then auto-advance
+        pl.history.push({
+          type:'turn',
+          ts:Date.now(),
+          darts:[...game.turnDarts],
+          before,
+          after: before,
+          bust:true
+        });
+        pl.remaining = before; // unchanged
+        setStatus('BUST ❌ Neste spiller');
+        setOut(`BUST (turn ${turnSum})`);
+        setConf('—');
+        game.turnDarts = [];
+        game.dartsThisTurn = 0;
+        updateGameUI();
+        nextPlayer();
+        return;
+      }
+
+      // Not bust: update remaining only "live" but commit the turn when 3 darts OR win OR next player pressed.
+      // We'll update player's remaining as if the turn is applied.
+      pl.remaining = after;
+
+      // record dart in history
+      pl.history.push({
+        type:'dart',
+        ts:Date.now(),
+        score,
+        label,
+        before,
+        after,
+        turnIndex: pl.history.filter(h=>h.type==='dart').length
+      });
+
+      if(win){
+        setStatus(`WIN ✅ ${pl.name} vant!`);
+        setOut(`${score} (${label})`);
+        setConf('—');
+        gameStatus.textContent = `501: ${pl.name} vant! 🎉`;
+        // lock game started but let you press Ny leg
+        game.turnDarts = [];
+        game.dartsThisTurn = 0;
+        updateGameUI();
+        return;
+      }
+
+      // Auto-advance after 3 darts
+      if(game.dartsThisTurn >= 3){
+        // commit turn summary to history (not bust)
+        pl.history.push({
+          type:'turn',
+          ts:Date.now(),
+          darts:[...game.turnDarts],
+          before,
+          after: pl.remaining,
+          bust:false
+        });
+        game.turnDarts = [];
+        game.dartsThisTurn = 0;
+        updateGameUI();
+        nextPlayer();
+        return;
+      }
+
+      updateGameUI();
+    }
+
+    function undoLast(){
+      if(!game.started) return;
+      const pl = currentPlayer();
+
+      // Remove last dart from player's history
+      // We'll revert one dart effect, and rebuild current turn state safely.
+      // Simplest: recompute player's remaining from start of leg using history (excluding last dart).
+      const h = pl.history;
+      const lastDartIndex = [...h].reverse().findIndex(x => x.type === 'dart');
+      if(lastDartIndex === -1){
+        setStatus('Ingenting å angre');
+        return;
+      }
+      const idx = h.length - 1 - lastDartIndex;
+      h.splice(idx, 1);
+
+      // Recompute remaining and current turn from scratch
+      pl.remaining = 501;
+      let tempTurn = [];
+      let tempDartsThisTurn = 0;
+
+      // Rebuild by iterating dart events only, and applying bust rules by turns of 3.
+      // We'll simulate: for each dart, add to turn; after 3 darts commit; handle bust.
+      const dartEvents = h.filter(x => x.type === 'dart');
+      pl.history = dartEvents; // keep only darts, we will not re-add 'turn'/'next' for simplicity.
+
+      let remaining = 501;
+      tempTurn = [];
+      tempDartsThisTurn = 0;
+
+      for(const de of dartEvents){
+        tempTurn.push({ score: de.score, label: de.label });
+        tempDartsThisTurn++;
+
+        const turnSum = tempTurn.reduce((a,b)=>a+b.score,0);
+        const after = remaining - turnSum;
+
+        let bust = false;
+        let win = false;
+
+        if(after < 0 || after === 1){
+          bust = true;
+        } else if(after === 0){
+          if(!isFinishDart(de.label, de.score)) bust = true;
+          else win = true;
+        }
+
+        if(bust){
+          // reset turn
+          tempTurn = [];
+          tempDartsThisTurn = 0;
+          // advance player turn not simulated (undo is per current player only); keep remaining unchanged
+        } else {
+          remaining = after;
+          if(win){
+            // game won; keep remaining 0
+            tempTurn = [];
+            tempDartsThisTurn = 0;
+          } else if(tempDartsThisTurn >= 3){
+            tempTurn = [];
+            tempDartsThisTurn = 0;
+          }
+        }
+      }
+
+      pl.remaining = remaining;
+      game.turnDarts = tempTurn;
+      game.dartsThisTurn = tempDartsThisTurn;
+
+      setStatus('Angret ✅');
+      updateGameUI();
+    }
+
+    // ---------- Checkout helper ----------
+    // Allowed hits: S1-20, D1-20, T1-20, 25, BULL(50). Finish must be D1-20 or 50.
+    const HIT_LIST = (() => {
+      const hits = [];
+      for(let n=1;n<=20;n++){
+        hits.push({score:n, label:`S${n}`});
+        hits.push({score:2*n, label:`D${n}`});
+        hits.push({score:3*n, label:`T${n}`});
+      }
+      hits.push({score:25, label:'25'});
+      hits.push({score:50, label:'BULL'});
+      return hits;
+    })();
+
+    const FINISH_LIST = (() => {
+      const f = [];
+      for(let n=1;n<=20;n++) f.push({score:2*n, label:`D${n}`});
+      f.push({score:50, label:'BULL'});
+      return f;
+    })();
+
+    function isFinishDart(label, score){
+      if(label === 'BULL' && score === 50) return true;
+      if(label && label.startsWith('D')) return true;
+      // If label unknown, fall back: even score could be double but we need certainty.
+      return false;
+    }
+
+    function getCheckoutSuggestion(remaining){
+      if(remaining <= 1) return null;
+      if(remaining > 170) return null;
+
+      // Prefer 1 dart, then 2, then 3. Return first found.
+      // (Simple search; good enough for helper)
+      // 1 dart
+      for(const f of FINISH_LIST){
+        if(f.score === remaining) return f.label;
+      }
+      // 2 darts: a + finish
+      for(const a of HIT_LIST){
+        for(const f of FINISH_LIST){
+          if(a.score + f.score === remaining) return `${a.label}, ${f.label}`;
+        }
+      }
+      // 3 darts: a + b + finish
+      for(const a of HIT_LIST){
+        for(const b of HIT_LIST){
+          for(const f of FINISH_LIST){
+            if(a.score + b.score + f.score === remaining) return `${a.label}, ${b.label}, ${f.label}`;
+          }
+        }
+      }
+      return null;
+    }
+
+    // ---------- Board scoring from point ----------
+    function scoreFromPoint(P){
+      const C=calib.center;
+      const dx=P.x-C.x, dy=P.y-C.y;
+      const dist=Math.hypot(dx,dy);
+      const frac=dist/calib.R;
+
+      if(frac > RING.doubleOut*1.03) return {score:0, label:'MISS'};
+      if(frac <= RING.innerBull) return {score:50, label:'BULL'};
+      if(frac <= RING.outerBull) return {score:25, label:'25'};
+
+      let ang = Math.atan2(dy,dx);
+      let d = ang - calib.angle0;
+      while(d<0) d += Math.PI*2;
+      while(d>=Math.PI*2) d -= Math.PI*2;
+
+      const sectorWidth=(Math.PI*2)/20;
+      const idx = Math.floor((d + sectorWidth/2)/sectorWidth) % 20;
+      const base = SECTORS[idx];
+
+      let mult=1;
+      if(frac >= RING.doubleIn) mult=2;
+      else if(frac >= RING.tripleIn && frac <= RING.tripleOut) mult=3;
+
+      const label = (mult===1?`S${base}`:(mult===2?`D${base}`:`T${base}`));
+      return {score: base*mult, label};
+    }
+
+    // ---------- Draw overlay ----------
     function draw(){
       const rect = c.getBoundingClientRect();
       ctx.clearRect(0,0,rect.width,rect.height);
@@ -109,7 +478,6 @@
       const vw = v.videoWidth, vh = v.videoHeight;
       if(!vw || !vh) return;
 
-      // object-fit:cover mapping
       const sx = rect.width / vw, sy = rect.height / vh;
       const s = Math.max(sx, sy);
       const drawW = vw*s, drawH = vh*s;
@@ -173,37 +541,11 @@
 
       setStatus('Kalibrert ✅');
       setConf('–');
-      hintEl.innerHTML = 'Kalibrert ✅<br>Trykk <b>Baseline</b> (tom skive), kast 1 pil og trykk <b>Detect</b>.';
+      hintEl.innerHTML = 'Kalibrert ✅<br>Trykk <b>Baseline</b> (tom skive), kast og trykk <b>Detect</b>. AI usikker → trykk pilspiss.';
       draw();
     }
 
-    function scoreFromPoint(P){
-      const C=calib.center;
-      const dx=P.x-C.x, dy=P.y-C.y;
-      const dist=Math.hypot(dx,dy);
-      const frac=dist/calib.R;
-
-      if(frac > RING.doubleOut*1.03) return {score:0, detail:'Utenfor'};
-      if(frac <= RING.innerBull) return {score:50, detail:'Bull (50)'};
-      if(frac <= RING.outerBull) return {score:25, detail:'Bull (25)'};
-
-      let ang = Math.atan2(dy,dx);
-      let d = ang - calib.angle0;
-      while(d<0) d += Math.PI*2;
-      while(d>=Math.PI*2) d -= Math.PI*2;
-
-      const sectorWidth=(Math.PI*2)/20;
-      const idx = Math.floor((d + sectorWidth/2)/sectorWidth) % 20;
-      const base = SECTORS[idx];
-
-      let mult=1;
-      if(frac >= RING.doubleIn) mult=2;
-      else if(frac >= RING.tripleIn && frac <= RING.tripleOut) mult=3;
-
-      return {score: base*mult, detail:`${mult===1?'S':(mult===2?'D':'T')} ${base}`};
-    }
-
-    // Tap: calibration OR manual scoring (hybrid fallback)
+    // ---------- Hybrid tap handler ----------
     c.addEventListener('click', (ev)=>{
       const p = getVideoPointFromTap(ev.clientX, ev.clientY);
 
@@ -215,18 +557,22 @@
         return;
       }
 
-      // Manual scoring always available after calibration (this is the hybrid safety net)
       if(calib.ready){
+        // Manual fallback: treat tap as hit point (pilspiss)
         lastPoint = p;
         forceManual = true;
         const s = scoreFromPoint(p);
-        setOut(`${s.score} (${s.detail})`);
-        setStatus('Manuell ✅ (trykk pilspiss)');
+        setOut(`${s.score} (${s.label})`);
+        setStatus('Manuell ✅');
         setConf('MANUELL');
         draw();
+
+        // Apply to 501
+        applyDart(s.score, s.label);
       }
     });
 
+    // ---------- Controls ----------
     document.getElementById('cal').addEventListener('click', ()=>{
       mode.cal=true; mode.step=0;
       calib={ready:false,center:null,top:null,right:null,R:null,angle0:null};
@@ -234,7 +580,6 @@
       roi=null; lastPoint=null; forceManual=false;
       setOut('–'); setConf('–');
       setStatus('Kalibrer: trykk bull');
-      hintEl.innerHTML='Kalibrer: trykk <b>bull</b>.';
       draw();
     });
 
@@ -245,10 +590,19 @@
       roi=null; lastPoint=null; forceManual=false;
       setOut('–'); setConf('–');
       setStatus('Reset');
-      hintEl.innerHTML='Trykk <b>Kalibrer</b> for å starte.';
       draw();
     });
 
+    btnStart.addEventListener('click', ()=> startGame());
+    btnNext.addEventListener('click', ()=> nextPlayer());
+    btnUndo.addEventListener('click', ()=> undoLast());
+    btnNewLeg.addEventListener('click', ()=> {
+      if(!game.players.length) startGame();
+      else resetLeg();
+      setStatus('Ny leg ✅');
+    });
+
+    // ---------- OpenCV helpers ----------
     function grabMatROIGray(){
       const vw=v.videoWidth, vh=v.videoHeight;
       const off=document.createElement('canvas');
@@ -265,7 +619,7 @@
       const r = new cv.Rect(roi.x, roi.y, roi.w, roi.h);
       let cropped = gray.roi(r);
       gray.delete();
-      return cropped; // caller deletes
+      return cropped;
     }
 
     function median3(a,b,c){
@@ -276,7 +630,7 @@
       cv.max(tmp,c,ac);
       cv.min(bc,ac,ab);
       tmp.delete(); bc.delete(); ac.delete();
-      return ab; // median
+      return ab;
     }
 
     document.getElementById('baseline').addEventListener('click', async ()=>{
@@ -290,7 +644,6 @@
       const A=grabMatROIGray(); await new Promise(r=>setTimeout(r,80));
       const B=grabMatROIGray(); await new Promise(r=>setTimeout(r,80));
       const C=grabMatROIGray();
-
       const M=median3(A,B,C);
       A.delete(); B.delete(); C.delete();
 
@@ -298,7 +651,6 @@
       baselineMat = M;
 
       setStatus('Baseline satt ✅');
-      hintEl.innerHTML='Baseline satt ✅<br>Kast 1 pil og trykk <b>Detect</b>. Hvis AI er usikker: trykk <b>pilspissen</b>.';
     });
 
     document.getElementById('detect').addEventListener('click', async ()=>{
@@ -317,7 +669,6 @@
 
       let diff = new cv.Mat();
       cv.absdiff(cur, baselineMat, diff);
-
       cv.GaussianBlur(diff, diff, new cv.Size(5,5), 0);
 
       let bin = new cv.Mat();
@@ -334,8 +685,9 @@
 
       const minArea = parseInt(minAreaEl.value,10) || 900;
 
-      let best = null, bestScore = -1;
+      let bestScore = -1;
       let secondScore = -1;
+      let bestRect = null;
 
       for(let i=0;i<contours.size();i++){
         const cnt = contours.get(i);
@@ -344,12 +696,12 @@
 
         const rect = cv.boundingRect(cnt);
         const aspect = rect.height / Math.max(1, rect.width);
-        const score = area * (0.6 + Math.min(2.2, aspect)); // prefer slender-ish blobs
+        const score = area * (0.6 + Math.min(2.2, aspect));
 
         if(score > bestScore){
           secondScore = bestScore;
           bestScore = score;
-          best = { rect, area, score };
+          bestRect = rect;
         } else if(score > secondScore){
           secondScore = score;
         }
@@ -358,47 +710,47 @@
 
       hierarchy.delete(); contours.delete();
 
-      if(!best){
-        setStatus('Fant ingen pil ❌ (senk Thr / senk MinArea / mer side-lys)');
+      if(!bestRect){
+        setStatus('Fant ingen pil ❌');
         setConf('0.00');
         cur.delete(); diff.delete(); bin.delete();
         return;
       }
 
-      // Confidence heuristic: how clearly best stands out from runner-up
       const eps = 1e-6;
       const ratio = bestScore / Math.max(eps, bestScore + Math.max(0, secondScore));
       const confMin = (parseInt(confMinEl.value,10) || 65) / 100;
 
-      // point = center of blob (good enough) + convert back to full coords
-      const px = roi.x + best.rect.x + best.rect.width/2;
-      const py = roi.y + best.rect.y + best.rect.height/2;
+      // detected point = center of best rect
+      const px = roi.x + bestRect.x + bestRect.width/2;
+      const py = roi.y + bestRect.y + bestRect.height/2;
       lastPoint = { x:px, y:py };
 
       if(ratio < confMin){
-        // Hybrid fallback: ask user to tap tip
         forceManual = true;
         setStatus('AI usikker ⚠️');
         setConf(`${ratio.toFixed(2)} (tap)`);
-        setOut('Trykk pilspissen');
-        hintEl.innerHTML = `<span class="warn"><b>AI usikker</b></span> (conf ${ratio.toFixed(2)}). Trykk <b>pilspissen</b> for korrekt score.`;
+        setOut('Trykk pilspiss');
         draw();
 
         cur.delete(); diff.delete(); bin.delete();
         return;
       }
 
-      // Confident → auto score
+      // confident: score automatically and apply to 501
       const s = scoreFromPoint(lastPoint);
-      setOut(`${s.score} (${s.detail})`);
+      forceManual = false;
       setStatus('Detect ✅');
       setConf(`${ratio.toFixed(2)} ✅`);
-      hintEl.innerHTML = `<span class="ok"><b>AI OK</b></span> (conf ${ratio.toFixed(2)}). Hvis feil: trykk pilspissen for å overstyre.`;
+      setOut(`${s.score} (${s.label})`);
       draw();
+
+      applyDart(s.score, s.label);
 
       cur.delete(); diff.delete(); bin.delete();
     });
 
+    // ---------- Camera start ----------
     async function startCam(){
       try{
         const stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:"environment" }, audio:false });
@@ -415,17 +767,19 @@
       }
     }
 
+    // Wait for OpenCV
     let tries=0;
     const waitCv = setInterval(()=>{
       tries++;
       if(window.cv && cv.Mat){
         clearInterval(waitCv);
-        setStatus('OpenCV klart ✅');
+        // ok
       }
       if(tries>200){ clearInterval(waitCv); setStatus('OpenCV lastet ikke'); }
     }, 100);
 
     startCam();
+    updateGameUI();
   })();
   </script>
 </body>

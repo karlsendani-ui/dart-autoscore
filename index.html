@@ -212,9 +212,22 @@
     }
 
     function applyDart(score, label){
-      if(!game.started){
-        // still show last score text even if game not started
-        return;
+
+  // AUTO-START 501 hvis spillet ikke er startet
+  if (!game.started) {
+    game.players = [
+      { name: p1.value || 'Spiller 1', remaining: 501, history: [] },
+      { name: p2.value || 'Spiller 2', remaining: 501, history: [] }
+    ];
+    game.current = 0;
+    game.turnDarts = [];
+    game.dartsThisTurn = 0;
+    game.started = true;
+    gameStatus.textContent = '501: Pågår ✅';
+    updateGameUI();
+  }
+
+  const pl = currentPlayer();
       }
       const pl = currentPlayer();
       const before = pl.remaining;
